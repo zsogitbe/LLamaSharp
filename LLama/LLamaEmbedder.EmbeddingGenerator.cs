@@ -14,7 +14,7 @@ public partial class LLamaEmbedder
     private EmbeddingGeneratorMetadata? _metadata;
 
     /// <inheritdoc />
-    object? IEmbeddingGenerator<string, Embedding<float>>.GetService(Type serviceType, object? serviceKey)
+    object? IEmbeddingGenerator.GetService(Type serviceType, object? serviceKey)
     {
         if (serviceKey is null)
         {
@@ -22,8 +22,8 @@ public partial class LLamaEmbedder
             {
                 return _metadata ??= new(
                     nameof(LLamaEmbedder),
-                    modelId: Context.NativeHandle.ModelHandle.ReadMetadata().TryGetValue("general.name", out var name) ? name : null,
-                    dimensions: EmbeddingSize);
+                    defaultModelId: Context.NativeHandle.ModelHandle.ReadMetadata().TryGetValue("general.name", out var name) ? name : null,
+                    defaultModelDimensions: EmbeddingSize);
             }
 
             if (serviceType?.IsInstanceOfType(Context) is true)
