@@ -31,6 +31,9 @@ public sealed class Conversation
     private int _speculativeTokensToIgnore = 0;
     private readonly Queue<LLamaToken> _speculativeTokens = new();
 
+    /// <summary>
+    /// indicates if speculative tokens are included
+    /// </summary>
     public bool HasSpeculativeTokens => _speculativeTokens.Count > 0;
 
     /// <summary>
@@ -260,6 +263,12 @@ public sealed class Conversation
             throw new AlreadyPromptedConversationException();
     }
 
+    /// <summary>
+    /// Prompt this conversation
+    /// </summary>
+    /// <param name="promptText"></param>
+    /// <param name="addBos"></param>
+    /// <param name="special"></param>
     public void Prompt(string promptText, bool addBos = true, bool special = true)
     {
         var tokens = Executor.Context.Tokenize(promptText, addBos, special);
@@ -823,6 +832,11 @@ public sealed class Conversation
         }
     }
 
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <returns></returns>
+    /// <exception cref="InvalidOperationException"></exception>
     public LLamaToken DequeueSpeculativeToken()
     {
         AssertNotDisposed();

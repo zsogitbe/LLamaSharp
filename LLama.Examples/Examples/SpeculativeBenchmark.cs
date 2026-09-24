@@ -35,64 +35,6 @@ namespace LLama.Examples.Examples
             Console.WriteLine($"Target Tokens: {maxTokens} tokens");
             Console.WriteLine("----------------------------------------------------------\n");
 
-            var targetParams = new ModelParams(targetModelPath)
-            {
-                ContextSize = 4096, 
-                BatchSize = 512,
-                LoadMTP = useMtp,
-                GpuLayerCount = -1,
-                MainGpu = 0,
-                UBatchSize = 512,
-                SplitMode = GPUSplitMode.None,
-                SeqMax = (uint)(draftTokens + 1),
-                ContextType = LLamaContextType.Default,
-
-                // NATIVE PERFORMANCE OPTIMIZERS
-                // llama.cpp explicitly warns that KVUnified=true can cause bad performance when SeqMax > 1
-                KVUnified = false,
-                SwaFull = true
-            };
-
-            using var targetWeights = LLamaWeights.LoadFromFile(targetParams);
-
-            // MTP AUTO-DETECT
-            // For optimal performance, the draft budget should perfectly match the number 
-            // of MTP projection heads baked into the model's metadata.
-            if (useMtp)
-            {
-                int mtpHeads = 0;
-                foreach (var kvp in targetWeights.Metadata)
-                {
-                    if (kvp.Key.EndsWith("nextn_predict_layers"))
-                    {
-                        if (int.TryParse(kvp.Value, out int heads))
-                        {
-                            mtpHeads = heads;
-                            break;
-                        }
-                    }
-                }
-
-                if (mtpHeads > 0)
-                {
-                    Console.WriteLine($"\n[MTP Auto-Detect] Found {mtpHeads} MTP projection heads in the model metadata.");
-                    if (draftTokens != mtpHeads)
-                    {
-                        Console.WriteLine($"[MTP Auto-Detect] Automatically adjusting draft budget from {draftTokens} to {mtpHeads} for optimal performance.");
-                        draftTokens = mtpHeads;
-
-                        // Update the SeqMax on our parameters BEFORE the Context is created
-                        targetParams.SeqMax = (uint)(draftTokens + 1);
-                    }
-                }
-                else
-                {
-                    Console.ForegroundColor = ConsoleColor.Yellow;
-                    Console.WriteLine("\n[MTP Auto-Detect] Warning: Could not find 'nextn_predict_layers' in metadata. Proceeding with requested budget.");
-                    Console.ResetColor();
-                }
-            }
-
             LLamaWeights? draftWeights = null;
 
             // CRITICAL CONTEXT SETUP
@@ -100,10 +42,23 @@ namespace LLama.Examples.Examples
             // Check if the user provided a distinct draft file (prevents accidental double-loading)
             bool isSeparateDraft = !string.Equals(targetModelPath, draftModelPath, StringComparison.OrdinalIgnoreCase);
 
+            // HARD CAP for ABI and memory safety (Max 31 drafts + 1 base = 32 ABI limit)
+            if (draftTokens > 31)
+            {
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine($"\n[Warning] Requested {draftTokens} drafts exceeds the native ABI limit. Capping to 31.");
+                Console.ResetColor();
+                draftTokens = 31;
+            }
+
+            // First load the draft model that it can be fully loaded into the GPU.
+            // Then, load the target model and distribute the layers as needed (GPUs, COU).
+
+            #region draft model
             // Always use draftModelPath here so Gemma 4 loads the correct assistant GGUF
             var draftParams = new ModelParams(draftModelPath)
             {
-                ContextSize = 4096,
+                ContextSize = 2048, //Most of the time, the next word in a sentence depends almost entirely on the immediately preceding words (grammar, formatting, or the current train of thought). A draft model only needs a few hundred tokens of context to successfully draft the next words...
                 BatchSize = 512,
                 LoadMTP = useMtp,
                 GpuLayerCount = -1,
@@ -126,6 +81,58 @@ namespace LLama.Examples.Examples
             {
                 draftWeights = LLamaWeights.LoadFromFile(draftParams);
             }
+            #endregion
+
+            #region target model
+            var targetParams = new ModelParams(targetModelPath)
+            {
+                ContextSize = 4096,
+                BatchSize = 512,
+                LoadMTP = useMtp,
+                GpuLayerCount = 20,
+                MainGpu = 0,
+                UBatchSize = 512,
+                SplitMode = GPUSplitMode.Layer,
+                SeqMax = (uint)(draftTokens + 1),
+                ContextType = LLamaContextType.Default,
+
+                // NATIVE PERFORMANCE OPTIMIZERS
+                // llama.cpp explicitly warns that KVUnified=true can cause bad performance when SeqMax > 1
+                KVUnified = false,
+                SwaFull = true
+            };
+
+            using var targetWeights = LLamaWeights.LoadFromFile(targetParams);
+
+            // MTP AUTO-DETECT
+            if (useMtp)
+            {
+                int mtpHeads = 0;
+                foreach (var kvp in targetWeights.Metadata)
+                {
+                    if (kvp.Key.EndsWith("nextn_predict_layers"))
+                    {
+                        if (int.TryParse(kvp.Value, out int heads))
+                        {
+                            mtpHeads = heads;
+                            break;
+                        }
+                    }
+                }
+
+                if (mtpHeads == 0)
+                {
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.WriteLine("\n[Error] MTP mode was requested, but the loaded model does not contain 'nextn_predict_layers' in its metadata.");
+                    Console.WriteLine("        This means the GGUF lacks the physical MTP projection heads required for self-drafting.");
+                    Console.WriteLine("        Please use an MTP-specific GGUF (e.g., Qwen3.6-35B-A3B-MTP-GGUF) or run Dual-Model speculation.");
+                    Console.ResetColor();
+
+                    // Gracefully abort the benchmark 
+                    return;
+                }
+            }
+            #endregion
 
             try
             {
