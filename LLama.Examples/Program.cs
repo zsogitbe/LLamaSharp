@@ -30,10 +30,7 @@ NativeLibraryConfig
 NativeLibraryConfig
    .All
    .WithCuda()
-   .WithVulkan()
-   .WithLibrary(
-        @"D:\_MTP\llama.cpp\_vs\bin\Release\llama.dll",
-        @"D:\_MTP\llama.cpp\_vs\bin\Release\mtmd.dll"); ;
+   .WithVulkan();
 
 // Calling this method forces loading to occur now.
 NativeApi.llama_empty_call();
