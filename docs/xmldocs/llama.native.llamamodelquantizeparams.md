@@ -12,7 +12,7 @@ Quantizer parameters used in the native API
 public struct LLamaModelQuantizeParams
 ```
 
-Inheritance [Object](https://docs.microsoft.com/en-us/dotnet/api/system.object) → [ValueType](https://docs.microsoft.com/en-us/dotnet/api/system.valuetype) → [LLamaModelQuantizeParams](./llama.native.llamamodelquantizeparams.md)
+Inheritance [Object](https://learn.microsoft.com/en-us/dotnet/api/system.object) → [ValueType](https://learn.microsoft.com/en-us/dotnet/api/system.valuetype) → [LLamaModelQuantizeParams](./llama.native.llamamodelquantizeparams.md)
 
 **Remarks:**
 
@@ -76,6 +76,22 @@ pointer to vector containing tensor types
 public IntPtr tensor_types;
 ```
 
+### **prune_layers**
+
+Pointer to vector containing layer indices to prune
+
+```csharp
+public IntPtr prune_layers;
+```
+
+### **max_buf_size**
+
+Maximum bytes of tensor rows held in memory, 0 = native default (8 GiB).
+
+```csharp
+public UIntPtr max_buf_size;
+```
+
 ## Properties
 
 ### **allow_requantize**
@@ -88,7 +104,7 @@ public bool allow_requantize { get; set; }
 
 #### Property Value
 
-[Boolean](https://docs.microsoft.com/en-us/dotnet/api/system.boolean)<br>
+[Boolean](https://learn.microsoft.com/en-us/dotnet/api/system.boolean)<br>
 
 ### **quantize_output_tensor**
 
@@ -100,7 +116,7 @@ public bool quantize_output_tensor { get; set; }
 
 #### Property Value
 
-[Boolean](https://docs.microsoft.com/en-us/dotnet/api/system.boolean)<br>
+[Boolean](https://learn.microsoft.com/en-us/dotnet/api/system.boolean)<br>
 
 ### **only_copy**
 
@@ -112,7 +128,7 @@ public bool only_copy { get; set; }
 
 #### Property Value
 
-[Boolean](https://docs.microsoft.com/en-us/dotnet/api/system.boolean)<br>
+[Boolean](https://learn.microsoft.com/en-us/dotnet/api/system.boolean)<br>
 
 ### **pure**
 
@@ -124,7 +140,7 @@ public bool pure { get; set; }
 
 #### Property Value
 
-[Boolean](https://docs.microsoft.com/en-us/dotnet/api/system.boolean)<br>
+[Boolean](https://learn.microsoft.com/en-us/dotnet/api/system.boolean)<br>
 
 ### **keep_split**
 
@@ -136,7 +152,19 @@ public bool keep_split { get; set; }
 
 #### Property Value
 
-[Boolean](https://docs.microsoft.com/en-us/dotnet/api/system.boolean)<br>
+[Boolean](https://learn.microsoft.com/en-us/dotnet/api/system.boolean)<br>
+
+### **dry_run**
+
+calculate and show the final quantization size without performing quantization
+
+```csharp
+public bool dry_run { get; set; }
+```
+
+#### Property Value
+
+[Boolean](https://learn.microsoft.com/en-us/dotnet/api/system.boolean)<br>
 
 ## Methods
 
@@ -145,7 +173,7 @@ public bool keep_split { get; set; }
 Create a LLamaModelQuantizeParams with default values
 
 ```csharp
-LLamaModelQuantizeParams Default()
+public static LLamaModelQuantizeParams Default()
 ```
 
 #### Returns

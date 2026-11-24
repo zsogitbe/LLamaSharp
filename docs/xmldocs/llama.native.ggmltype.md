@@ -12,8 +12,8 @@ Possible GGML quantisation types
 public enum GGMLType
 ```
 
-Inheritance [Object](https://docs.microsoft.com/en-us/dotnet/api/system.object) → [ValueType](https://docs.microsoft.com/en-us/dotnet/api/system.valuetype) → [Enum](https://docs.microsoft.com/en-us/dotnet/api/system.enum) → [GGMLType](./llama.native.ggmltype.md)<br>
-Implements [IComparable](https://docs.microsoft.com/en-us/dotnet/api/system.icomparable), [ISpanFormattable](https://docs.microsoft.com/en-us/dotnet/api/system.ispanformattable), [IFormattable](https://docs.microsoft.com/en-us/dotnet/api/system.iformattable), [IConvertible](https://docs.microsoft.com/en-us/dotnet/api/system.iconvertible)
+Inheritance [Object](https://learn.microsoft.com/en-us/dotnet/api/system.object) → [ValueType](https://learn.microsoft.com/en-us/dotnet/api/system.valuetype) → [Enum](https://learn.microsoft.com/en-us/dotnet/api/system.enum) → [GGMLType](./llama.native.ggmltype.md)<br>
+Implements [IComparable](https://learn.microsoft.com/en-us/dotnet/api/system.icomparable), [ISpanFormattable](https://learn.microsoft.com/en-us/dotnet/api/system.ispanformattable), [IFormattable](https://learn.microsoft.com/en-us/dotnet/api/system.iformattable), [IConvertible](https://learn.microsoft.com/en-us/dotnet/api/system.iconvertible)
 
 ## Fields
 
@@ -33,10 +33,11 @@ Implements [IComparable](https://docs.microsoft.com/en-us/dotnet/api/system.icom
 | GGML_TYPE_Q5_K | 13 | "type-1" 5-bit quantization. Same super-block structure as GGML_TYPE_Q4_K resulting in 5.5 bpw |
 | GGML_TYPE_Q6_K | 14 | "type-0" 6-bit quantization. Super-blocks with 16 blocks, each block having 16 weights. Scales are quantized with 8 bits. This ends up using 6.5625 bpw |
 | GGML_TYPE_Q8_K | 15 | "type-0" 8-bit quantization. Only used for quantizing intermediate results. The difference to the existing Q8_0 is that the block size is 256. All 2-6 bit dot products are implemented for this quantization type. |
-| GGML_TYPE_I8 | 16 | Integer, 8 bit |
-| GGML_TYPE_I16 | 17 | Integer, 16 bit |
-| GGML_TYPE_I32 | 18 | Integer, 32 bit |
-| GGML_TYPE_COUNT | 19 | The value of this entry is the count of the number of possible quant types. |
+| GGML_TYPE_I8 | 24 | Integer, 8 bit |
+| GGML_TYPE_I16 | 25 | Integer, 16 bit |
+| GGML_TYPE_I32 | 26 | Integer, 32 bit |
+| GGML_TYPE_F8_E4M3 | 43 | OCP FP8 E4M3 floating point. |
+| GGML_TYPE_COUNT | 44 | The value of this entry is the count of the number of possible quant types. |
 
 ---
 

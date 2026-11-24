@@ -23,7 +23,7 @@ namespace LLama.Native
     public enum AvxLevel
     {
         /// <summary>
-        /// No AVX
+        /// No AVX or SSE4.2. For x86_64 CPUs that only provide SSSE3 / SSE2.
         /// </summary>
         None,
 

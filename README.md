@@ -5,6 +5,7 @@
 [![LLamaSharp Badge](https://img.shields.io/nuget/v/LLamaSharp?label=LLamaSharp)](https://www.nuget.org/packages/LLamaSharp)
 [![LLamaSharp Badge](https://img.shields.io/nuget/v/LLamaSharp.Backend.Cpu?label=LLamaSharp.Backend.Cpu)](https://www.nuget.org/packages/LLamaSharp.Backend.Cpu)
 [![LLamaSharp Badge](https://img.shields.io/nuget/v/LLamaSharp.Backend.Cuda12?label=LLamaSharp.Backend.Cuda12)](https://www.nuget.org/packages/LLamaSharp.Backend.Cuda12)
+[![LLamaSharp Badge](https://img.shields.io/nuget/v/LLamaSharp.Backend.Cuda13?label=LLamaSharp.Backend.Cuda13)](https://www.nuget.org/packages/LLamaSharp.Backend.Cuda13)
 [![LLamaSharp Badge](https://img.shields.io/nuget/v/LLamaSharp.Backend.Vulkan?label=LLamaSharp.Backend.Vulkan)](https://www.nuget.org/packages/LLamaSharp.Backend.Vulkan)
 
 
@@ -94,8 +95,8 @@ PM> Install-Package LLamaSharp
 2. Install one or more of these backends, or use a self-compiled backend.
 
    - [`LLamaSharp.Backend.Cpu`](https://www.nuget.org/packages/LLamaSharp.Backend.Cpu): Pure CPU for Windows, Linux & Mac. Metal (GPU) support for Mac.
-   - [`LLamaSharp.Backend.Cuda11`](https://www.nuget.org/packages/LLamaSharp.Backend.Cuda11): CUDA 11 for Windows & Linux.
    - [`LLamaSharp.Backend.Cuda12`](https://www.nuget.org/packages/LLamaSharp.Backend.Cuda12): CUDA 12 for Windows & Linux.
+   - [`LLamaSharp.Backend.Cuda13`](https://www.nuget.org/packages/LLamaSharp.Backend.Cuda13): CUDA 13 for Windows & Linux.
    - [`LLamaSharp.Backend.Vulkan`](https://www.nuget.org/packages/LLamaSharp.Backend.Vulkan): Vulkan for Windows & Linux.
 
 ### Model preparation
@@ -263,7 +264,9 @@ If you want to compile llama.cpp yourself you **must** use the exact commit ID l
 | v0.26.0 | | [`506bb6e01009058f35558474cf987eeb56361782`](https://github.com/ggerganov/llama.cpp/tree/506bb6e01009058f35558474cf987eeb56361782)
 | v0.27.0 | Qwen3.5 & Gemma4 | [`3f7c29d318e317b63f54c558bc69803963d7d88c`](https://github.com/ggerganov/llama.cpp/tree/3f7c29d318e317b63f54c558bc69803963d7d88c)
 | v0.28.0 |  | [`c0c7e147e7efa6c5858754b47259ba4880f8a906`](https://github.com/ggerganov/llama.cpp/tree/c0c7e147e7efa6c5858754b47259ba4880f8a906)
-| v0.29.0 |  | [`815a2a5915f22ce6a760c676389c5dfe8535c08f`](https://github.com/ggerganov/llama.cpp/tree/815a2a5915f22ce6a760c676389c5dfe8535c08f )
+| v0.29.0 |  | [`815a2a5915f22ce6a760c676389c5dfe8535c08f`](https://github.com/ggerganov/llama.cpp/tree/815a2a5915f22ce6a760c676389c5dfe8535c08f)
+| v0.30.0 |  | [`815a2a5915f22ce6a760c676389c5dfe8535c08f`](https://github.com/ggerganov/llama.cpp/tree/815a2a5915f22ce6a760c676389c5dfe8535c08f) (With Cuda 13)
+| v1.0.0 |  | [v1.0.0 (`b1b770d9`)](https://github.com/ggml-org/llama.cpp/tree/b1b770d90d94cad9e9ea5b993bdbc383a522fb28) |
 
 ## License
 

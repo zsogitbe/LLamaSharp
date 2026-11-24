@@ -1,9 +1,5 @@
 using LLama.Common;
-using LLama.Extensions;
 using LLama.Native;
-using Microsoft.Extensions.AI;
-using System.Runtime.InteropServices;
-using Xunit.Abstractions;
 
 namespace LLama.Unittest;
 
@@ -43,7 +39,7 @@ public sealed class LLamaRerankerTests: IDisposable
             "sometimes called a panda bear or simply panda",
             "is a bear species endemic to China.") 
         };
-        var scores = await _reranker.GetRelevanceScores(input, documents, normalize: false);
+        var scores = await _reranker.GetRelevanceScores(input, documents, normalize: false, cancellationToken: TestContext.Current.CancellationToken);
 
         Assert.True(documents.Length == scores.Count);
 
@@ -63,7 +59,7 @@ public sealed class LLamaRerankerTests: IDisposable
             "sometimes called a panda bear or simply panda",
             "is a bear species endemic to China.")
         };
-        var scores = await _reranker.GetRelevanceScores(input, documents, normalize: true);
+        var scores = await _reranker.GetRelevanceScores(input, documents, normalize: true, TestContext.Current.CancellationToken);
 
         Assert.NotNull(scores);
         Assert.True(documents.Length == scores.Count);
@@ -74,5 +70,24 @@ public sealed class LLamaRerankerTests: IDisposable
 
         var maxScoreDocument = documents[maxIndex];
         Assert.Equal(documents[2], maxScoreDocument);
+    }
+
+    /// <summary>
+    /// Multiple documents must be split into batches when the context allows one sequence.
+    /// </summary>
+    [Fact]
+    public async Task BatchedScoresMatchIndividualScoresWithOneSequence()
+    {
+        Assert.Equal(1u, _reranker.Context.NativeHandle.MaxSeq);
+        const string input = "what is panda?";
+        string[] documents = ["hi", "it's a bear", "The giant panda is a bear species endemic to China."];
+        var cancellation = TestContext.Current.CancellationToken;
+        var scores = await _reranker.GetRelevanceScores(input, documents, cancellationToken: cancellation);
+        Assert.Equal(documents.Length, scores.Count);
+        for (var i = 0; i < documents.Length; i++)
+        {
+            var (expected, _) = await _reranker.GetRelevanceScoreWithTokenCount(input, documents[i], cancellationToken: cancellation);
+            Assert.Equal(expected, scores[i], precision: 4);
+        }
     }
 }

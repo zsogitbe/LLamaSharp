@@ -138,10 +138,18 @@ public static class LLamaExecutorExtensions
         /// <summary>Convert the chat options to inference parameters.</summary>
         private InferenceParams CreateInferenceParams(ChatOptions? options)
         {
-            InferenceParams ip = options?.RawRepresentationFactory?.Invoke(this) as InferenceParams ?? new();
+            var raw = options?.RawRepresentationFactory?.Invoke(this) as InferenceParams;
+            InferenceParams ip = raw ?? new();
 
             ip.AntiPrompts = [.. s_antiPrompts, .. ip.AntiPrompts];
-            ip.MaxTokens = options?.MaxOutputTokens ?? 256; // arbitrary upper limit
+            ip.MaxTokens = options?.MaxOutputTokens ?? (raw is null ? 256 : ip.MaxTokens); // arbitrary upper limit when no InferenceParams are given
+
+            // A sampling pipeline other than DefaultSamplingPipeline is kept as given: the chat options cannot be applied to it.
+            if (ip.SamplingPipeline is not null and not DefaultSamplingPipeline)
+            {
+                return ip;
+            }
+
             ip.SamplingPipeline = new DefaultSamplingPipeline()
             {
                 FrequencyPenalty = options?.FrequencyPenalty ?? (ip.SamplingPipeline as DefaultSamplingPipeline)?.FrequencyPenalty ?? s_defaultPipeline.FrequencyPenalty,
@@ -155,10 +163,10 @@ public static class LLamaExecutorExtensions
                 LogitBias = (ip.SamplingPipeline as DefaultSamplingPipeline)?.LogitBias ?? s_defaultPipeline.LogitBias,
                 MinKeep = (ip.SamplingPipeline as DefaultSamplingPipeline)?.MinKeep ?? s_defaultPipeline.MinKeep,
                 MinP = (ip.SamplingPipeline as DefaultSamplingPipeline)?.MinP ?? s_defaultPipeline.MinP,
-                Seed = options?.Seed is long seed ? (uint)seed : (uint)(t_random ??= new()).Next(),
-                Temperature = options?.Temperature ?? s_defaultPipeline.Temperature,
-                TopP = options?.TopP ?? s_defaultPipeline.TopP,
-                TopK = options?.TopK ?? s_defaultPipeline.TopK,
+                Seed = options?.Seed is long seed ? (uint)seed : (ip.SamplingPipeline as DefaultSamplingPipeline)?.Seed ?? (uint)(t_random ??= new()).Next(),
+                Temperature = options?.Temperature ?? (ip.SamplingPipeline as DefaultSamplingPipeline)?.Temperature ?? s_defaultPipeline.Temperature,
+                TopP = options?.TopP ?? (ip.SamplingPipeline as DefaultSamplingPipeline)?.TopP ?? s_defaultPipeline.TopP,
+                TopK = options?.TopK ?? (ip.SamplingPipeline as DefaultSamplingPipeline)?.TopK ?? s_defaultPipeline.TopK,
                 TypicalP = (ip.SamplingPipeline as DefaultSamplingPipeline)?.TypicalP ?? s_defaultPipeline.TypicalP,
             };
 

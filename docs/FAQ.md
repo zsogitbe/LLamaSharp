@@ -24,6 +24,22 @@ Generally, there are two possible cases for this problem:
 1. The native library (backend) you are using is not compatible with the LLamaSharp version. If you compiled the native library yourself, please make sure you have checkouted llama.cpp to the corresponding commit of LLamaSharp, which could be found at the bottom of README.
 2. The model file you are using is not compatible with the backend. If you are using a GGUF file downloaded from huggingface, please check its publishing time.
 
+### Illegal instruction (core dumped) on an older CPU
+
+`LLamaSharp.Backend.Cpu` ships several x86_64 binaries. The loader picks `noavx` when the CPU has no AVX. Those binaries must also be free of SSE4.2. A CPU that only has SSSE3 (no `sse4_1` / `sse4_2` in `lscpu`) will SIGILL if the `noavx` build still contains SSE4.2 kernels.
+
+Until a backend package built with `-DGGML_SSE42=OFF` is published, compile llama.cpp yourself and load it before any other LLamaSharp call:
+
+```bash
+cmake -B build -DGGML_NATIVE=OFF -DGGML_AVX=OFF -DGGML_AVX2=OFF -DGGML_FMA=OFF -DGGML_F16C=OFF -DGGML_BMI2=OFF -DGGML_SSE42=OFF -DCMAKE_C_FLAGS=-march=x86-64 -DCMAKE_CXX_FLAGS=-march=x86-64 -DBUILD_SHARED_LIBS=ON
+```
+
+```cs
+NativeLibraryConfig.All.WithLibrary("<path-to-libllama.so-or-llama.dll>", null);
+```
+
+You can also add `NativeLibraryConfig.All.WithLogCallback(...)` at startup to confirm which runtime folder was loaded (`noavx`, `avx`, `avx2`, ...).
+
 
 ## Why my model is generating output infinitely
 

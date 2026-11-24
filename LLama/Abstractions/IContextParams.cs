@@ -1,6 +1,6 @@
-using LLama.Native;
 using System;
 using System.Text;
+using LLama.Native;
 
 namespace LLama.Abstractions;
 
@@ -20,12 +20,6 @@ public interface IContextParams
     LLamaContextType ContextType { get; }
 
     /// <summary>
-    /// A source/target/parent context.
-    /// Utilized by MTP (Multi-Token Prediction) to link the draft context to the target context's hidden states.
-    /// </summary>
-    IntPtr CtxOther { get; set; }
-
-    /// <summary>
     /// maximum batch size that can be submitted at once (must be >=32 to use BLAS) (n_batch)
     /// </summary>
     uint BatchSize { get; }
@@ -36,7 +30,7 @@ public interface IContextParams
     uint UBatchSize { get; }
 
     /// <summary>
-    /// max number of sequences (i.e. distinct states for recurrent models)
+    /// Maximum simultaneous sequences. Sequence IDs must be less than this value, including with a unified KV cache.
     /// </summary>
     uint SeqMax { get; }
 
@@ -116,6 +110,16 @@ public interface IContextParams
     GGMLType? TypeV { get; }
 
     /// <summary>
+    /// Gets the device cache size in bytes for experts kept in host memory, 0 = disabled.
+    /// </summary>
+    nuint MoeCacheSize { get; }
+
+    /// <summary>
+    /// Gets the share of the MoE cache misses computed on the CPU instead of uploaded, 0 = all uploaded. <b>EXPERIMENTAL</b>
+    /// </summary>
+    float MoeCacheCpuShare { get; }
+
+    /// <summary>
     /// Whether to disable offloading the KQV cache to the GPU
     /// </summary>
     bool NoKqvOffload { get; }
@@ -124,11 +128,6 @@ public interface IContextParams
     /// Whether to use flash attention
     /// </summary>
     bool? FlashAttention { get; }
-    
-    /// <summary>
-    /// defragment the KV cache if holes/size &gt; defrag_threshold, Set to &lt;= 0 to disable (default)
-    /// </summary>
-    float? DefragThreshold { get; }
 
     /// <summary>
     /// How to pool (sum) embedding results by sequence id (ignored if no pooling layer)

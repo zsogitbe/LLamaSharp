@@ -11,7 +11,6 @@ using LLama.Abstractions;
 using LLama.Common;
 using LLama.Exceptions;
 using LLama.Native;
-using LLama.Sampling;
 using Microsoft.Extensions.Logging;
 
 namespace LLama
@@ -29,7 +28,7 @@ namespace LLama
         private readonly string _instructionSuffix;
 
         /// <summary>
-        /// 
+        /// Construct a new InstructExecutor
         /// </summary>
         /// <param name="context"></param>
         /// <param name="instructionPrefix"></param>
@@ -47,6 +46,14 @@ namespace LLama
             _instructionSuffix = instructionSuffix;
         }
 
+        /// <summary>
+        /// Construct a new InstructExecutor, with multimodal model weights
+        /// </summary>
+        /// <param name="context"></param>
+        /// <param name="clipModel"></param>
+        /// <param name="instructionPrefix"></param>
+        /// <param name="instructionSuffix"></param>
+        /// <param name="logger"></param>
         public InstructExecutor(LLamaContext context,
                                 MtmdWeights clipModel,
                                 string instructionPrefix = "\n\n### Instruction:\n\n",
@@ -207,7 +214,8 @@ namespace LLama
                 }
             }
 
-            if (_embeds.Count > 0 && _embeds.Last() == Context.Vocab.EOS)
+            // Only react to an EOS token that was just sampled, not to a prompt chunk that ends on one (#1465).
+            if (args.ReturnValue && _embeds.Count > 0 && _embeds.Last() == Context.Vocab.EOS)
             {
                 args.WaitForInput = true;
             }

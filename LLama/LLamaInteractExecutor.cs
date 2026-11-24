@@ -8,10 +8,8 @@ using System.Threading;
 using System.Threading.Tasks;
 using LLama.Abstractions;
 using LLama.Common;
-using LLama;
 using LLama.Exceptions;
 using LLama.Native;
-using LLama.Sampling;
 using Microsoft.Extensions.Logging;
 
 
@@ -23,12 +21,7 @@ namespace LLama
     public class InteractiveExecutor : StatefulExecutorBase
     {
         // Indicates whether the executor is currently evaluating the initial prompt or a follow-up turn.
-        private bool _is_prompt_run = true;
-
-        // MTMD multimodal state
-        private SafeMtmdInputChunks? _mtmdChunks;  // Pending chunk collection produced by the multimodal tokenizer.
-        private string? _mtmdMarker;  // Cached multimodal marker returned by the native helper.
-
+        private bool _isPromptRun = true;
 
         /// <summary>
         /// Create an interactive executor for text-only inference.
@@ -57,15 +50,15 @@ namespace LLama
             InteractiveExecutorState state = new()
             {
                 ConsumedSessionCount = _n_session_consumed,
-                EmbedInps = _embed_inps.ToArray(),
-                IsPromptRun = _is_prompt_run,
+                EmbedInps = [ .. _embed_inps ],
+                IsPromptRun = _isPromptRun,
                 ConsumedTokensCount = _consumedTokensCount,
-                Embeds = _embeds.ToArray(),
-                LastTokens = _last_n_tokens.ToArray(),
+                Embeds = [ .. _embeds ],
+                LastTokens = [ .. _last_n_tokens ],
                 MatchingSessionTokensCount = _n_matching_session_tokens,
                 PastTokensCount = _pastTokensCount,
                 SessionFilePath = _pathSession,
-                SessionTokens = _session_tokens.ToArray(),
+                SessionTokens = [ .. _session_tokens ],
                 LastTokensCapacity = _last_n_tokens.Capacity,
             };
             return state;
@@ -78,15 +71,15 @@ namespace LLama
             if (data is InteractiveExecutorState state)
             {
                 _n_session_consumed = state.ConsumedSessionCount;
-                _embed_inps = state.EmbedInps!.ToList();
-                _is_prompt_run = state.IsPromptRun;
+                _embed_inps = [ .. state.EmbedInps ];
+                _isPromptRun = state.IsPromptRun;
                 _consumedTokensCount = state.ConsumedTokensCount;
-                _embeds = state.Embeds!.ToList();
-                _last_n_tokens = new FixedSizeQueue<LLamaToken>(state.LastTokensCapacity, state.LastTokens!);
+                _embeds = [ .. state.Embeds ];
+                _last_n_tokens = new FixedSizeQueue<LLamaToken>(state.LastTokensCapacity, state.LastTokens);
                 _n_matching_session_tokens = state.MatchingSessionTokensCount;
                 _pastTokensCount = state.PastTokensCount;
                 _pathSession = state.SessionFilePath;
-                _session_tokens = state.SessionTokens!.ToList();
+                _session_tokens = [ .. state.SessionTokens ];
             }
             else
                 throw new ArgumentException("Invalid state data type.");
@@ -109,7 +102,7 @@ namespace LLama
         {
             using var fs = new FileStream(filename, FileMode.Open, FileAccess.Read);
 
-            var state = await JsonSerializer.DeserializeAsync<InteractiveExecutorState>(fs);
+            var state = await JsonSerializer.DeserializeAsync<InteractiveExecutorState>(fs, cancellationToken: cancellationToken);
             await LoadState(state!, cancellationToken);
         }
 
@@ -117,10 +110,11 @@ namespace LLama
         /// Decide whether generation should continue for the current iteration.
         /// </summary>
         /// <param name="args">Mutable inference state.</param>
+        /// <param name="cancellationToken"></param>
         /// <returns><c>true</c> to keep generating; otherwise <c>false</c>.</returns>
-        protected override Task<bool> GetLoopCondition(InferStateArgs args, CancellationToken cancellationToken)
+        protected override Task<bool> GetLoopCondition(InferStateArgs args, CancellationToken cancellationToken = default)
         {
-            return Task.FromResult(args.RemainedTokens != 0 && !args.WaitForInput || _is_prompt_run);
+            return Task.FromResult(args.RemainedTokens != 0 && !args.WaitForInput || _isPromptRun);
         }
 
         /// <summary>
@@ -128,9 +122,10 @@ namespace LLama
         /// </summary>
         /// <param name="text">Prompt text or continuation provided by the caller.</param>
         /// <param name="args">Mutable inference state.</param>
-        protected override Task PreprocessInputs(string? text, InferStateArgs args, CancellationToken cancellationToken)
+        /// <param name="cancellationToken"></param>
+        protected override Task PreprocessInputs(string? text, InferStateArgs args, CancellationToken cancellationToken = default)
         {
-            if (_is_prompt_run)
+            if (_isPromptRun)
             {
                 // When running the first input (prompt) in interactive mode, we should specially process it.
                 if (text == null)
@@ -140,7 +135,7 @@ namespace LLama
 
                 if (!IsMultiModal)
                 {
-                    _embed_inps = Context.Tokenize(text, true, true).ToList();
+                    _embed_inps = [ .. Context.Tokenize(text, true, true) ];
                 }
                 else
                 {
@@ -159,9 +154,9 @@ namespace LLama
 
                     if (!IsMultiModal)
                     {
-                        var line_inp = Context.Tokenize(text, false, true);
-                        _embed_inps.AddRange(line_inp);
-                        args.RemainedTokens -= line_inp.Length;
+                        var lineInput = Context.Tokenize(text, false, true);
+                        _embed_inps.AddRange(lineInput);
+                        args.RemainedTokens -= lineInput.Length;
                     }
                     else
                     {
@@ -180,7 +175,7 @@ namespace LLama
         /// <param name="args">Mutable inference state.</param>
         /// <param name="cancellationToken"></param>
         /// <returns>Tuple describing whether to stop and any additional outputs to emit.</returns>
-        protected override Task<(bool, IReadOnlyList<string>)> PostProcess(IInferenceParams inferenceParams, InferStateArgs args, CancellationToken cancellationToken)
+        protected override Task<(bool, IReadOnlyList<string>)> PostProcess(IInferenceParams inferenceParams, InferStateArgs args, CancellationToken cancellationToken = default)
         {
             if (_embed_inps.Count <= _consumedTokensCount)
             {
@@ -195,7 +190,10 @@ namespace LLama
                 }
             }
 
-            if (_embeds.Count > 0 && _embeds.Last().IsEndOfGeneration(Context.Vocab))
+            // Only stop on an end-of-generation token that was just sampled. While the prompt is being
+            // fed in BatchSize chunks, _embeds holds a prompt chunk, which may end on an EOG token
+            // (e.g. the end-of-turn marker of a chat template). See #1465.
+            if (args.ReturnValue && _embeds.Count > 0 && _embeds.Last().IsEndOfGeneration(Context.Vocab))
             {
                 return Task.FromResult((true, (IReadOnlyList<string>)[]));
             }
@@ -211,13 +209,13 @@ namespace LLama
         }
 
         /// <inheritdoc />
-        protected override async Task InferInternal(IInferenceParams inferenceParams, InferStateArgs args, CancellationToken cancellationToken)
+        protected override async Task InferInternal(IInferenceParams inferenceParams, InferStateArgs args, CancellationToken cancellationToken = default)
         {
             var batch = new LLamaBatch();
 
             if (_embeds.Count > 0)
             {
-                _is_prompt_run = false;
+                _isPromptRun = false;
                 if (_pastTokensCount + _embeds.Count > Context.ContextSize)
                 {
                     // number of tokens to keep when resetting context
@@ -248,7 +246,7 @@ namespace LLama
                 }
                 else
                 {
-                    var result = await Context.DecodeAsync(_embeds, LLamaSeqId.Zero, batch, _pastTokensCount);
+                    var result = await Context.DecodeAsync(_embeds, LLamaSeqId.Zero, batch, _pastTokensCount, cancellationToken);
                     _pastTokensCount = result.Item3;
 
                     if (result.Item1 != DecodeResult.Ok) throw new LLamaDecodeError(result.Item1);
@@ -262,7 +260,7 @@ namespace LLama
             }
             else if (IsMultiModal && MtmdChunks is not null)
             {
-                _is_prompt_run = false;
+                _isPromptRun = false;
                 var nPast = _pastTokensCount;
                 var previousConsumed = _consumedTokensCount;
                 EvaluateMtmdChunks(ref nPast, previousConsumed, nameof(InteractiveExecutor));
@@ -297,8 +295,8 @@ namespace LLama
                     id = Context.NativeHandle.ModelHandle.Vocab.Newline!.Value;
                     if (args.Antiprompts is not null && args.Antiprompts.Count > 0)
                     {
-                        var first_antiprompt = Context.Tokenize(args.Antiprompts[0], false, true);
-                        _embed_inps.AddRange(first_antiprompt);
+                        var firstAntiprompt = Context.Tokenize(args.Antiprompts[0], false, true);
+                        _embed_inps.AddRange(firstAntiprompt);
                     }
                 }
 
@@ -320,15 +318,13 @@ namespace LLama
                     }
                 }
             }
-
-            return;
         }
 
         /// <summary>
         /// Serializable state specific to the interactive executor.
         /// </summary>
         public class InteractiveExecutorState
-            : StatefulExecutorBase.ExecutorBaseState
+            : ExecutorBaseState
         {
             /// <summary>
             /// Whether the executor is running for the first time (running the prompt).

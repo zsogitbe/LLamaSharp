@@ -27,8 +27,10 @@ jobs:
       fail-fast: true
       matrix:
         include:
+          # SSE4.2 stays on unless we disable it; that SIGILLs pre-Nehalem CPUs (#1422).
+          # -march=x86-64 stops gcc from emitting SSE4 via auto-vectorization.
           - build: 'noavx'
-            defines: '-DGGML_AVX=OFF -DGGML_AVX2=OFF -DGGML_FMA=OFF -DGGML_F16C=OFF -DGGML_BMI2=OFF'
+            defines: '-DGGML_AVX=OFF -DGGML_AVX2=OFF -DGGML_FMA=OFF -DGGML_F16C=OFF -DGGML_BMI2=OFF -DGGML_SSE42=OFF -DCMAKE_C_FLAGS=-march=x86-64 -DCMAKE_CXX_FLAGS=-march=x86-64'
             os: ubuntu-22.04
             arch: x64
           - build: 'avx2'
@@ -95,7 +97,7 @@ jobs:
       matrix:
         include:
           - build: 'noavx'
-            defines: '-DGGML_AVX=OFF -DGGML_AVX2=OFF -DGGML_FMA=OFF -DGGML_F16C=OFF -DGGML_BMI2=OFF'
+            defines: '-DGGML_AVX=OFF -DGGML_AVX2=OFF -DGGML_FMA=OFF -DGGML_F16C=OFF -DGGML_BMI2=OFF -DGGML_SSE42=OFF -DCMAKE_C_FLAGS=-march=x86-64 -DCMAKE_CXX_FLAGS=-march=x86-64'
           - build: 'avx2'
             defines: ''
           - build: 'avx'
@@ -160,7 +162,7 @@ jobs:
       matrix:
         include:
           - build: 'noavx'
-            defines: '-DGGML_AVX=OFF -DGGML_AVX2=OFF -DGGML_FMA=OFF -DGGML_F16C=OFF -DGGML_BMI2=OFF'
+            defines: '-DGGML_AVX=OFF -DGGML_AVX2=OFF -DGGML_FMA=OFF -DGGML_F16C=OFF -DGGML_BMI2=OFF -DGGML_SSE42=OFF'
           - build: 'avx2'
             defines: ''
           - build: 'avx'
@@ -222,8 +224,9 @@ jobs:
       matrix:
         include:
           - build: 'arm64'
-            defines: '-T ClangCL -DCMAKE_GENERATOR_PLATFORM=ARM64 -DGGML_NATIVE=OFF'
-    runs-on: windows-latest
+            # ClangCL + CMake PCH disagrees on C17 for ggml-cpu, so llama.dll is never built.
+            defines: '-T ClangCL -DCMAKE_GENERATOR_PLATFORM=ARM64 -DGGML_NATIVE=OFF -DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON'
+    runs-on: windows-2022
     steps:
       - uses: actions/checkout@v6
         with:
@@ -238,6 +241,7 @@ jobs:
           cd build
           cmake .. ${{ env.COMMON_DEFINE }} ${{ matrix.defines }}
           cmake --build . --config Release -j ${env:NUMBER_OF_PROCESSORS} --target ggml ggml-base ggml-cpu llama mtmd
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           tree /f
 
       - name: Upload artifacts (llama)
@@ -395,13 +399,101 @@ jobs:
                 name: mtmd-bin-linux-vulkan-x64.so
                 if-no-files-found: error
 
+  compile-sycl:
+      name: Compile (sycl) - ${{ matrix.os }}
+      strategy:
+          fail-fast: false
+          matrix:
+              os: [
+                  ubuntu-24.04
+              ]
+      env:
+          # Linux oneAPI
+          ONEAPI_ROOT: /opt/intel/oneapi/
+          ONEAPI_INSTALLER_VERSION: "2025.3.3"
+          LEVEL_ZERO_VERSION: "1.28.2"
+          LEVEL_ZERO_UBUNTU_VERSION: "u24.04"
+          # Windows oneAPI
+          WINDOWS_BASEKIT_URL: https://registrationcenter-download.intel.com/akdlm/IRC_NAS/b60765d1-2b85-4e85-86b6-cb0e9563a699/intel-deep-learning-essentials-2025.3.3.18_offline.exe
+          WINDOWS_DPCPP_MKL: intel.oneapi.win.cpp-dpcpp-common:intel.oneapi.win.mkl.devel:intel.oneapi.win.dnnl:intel.oneapi.win.tbb.devel
+          LEVEL_ZERO_SDK_URL: https://github.com/oneapi-src/level-zero/releases/download/v1.28.2/level-zero-win-sdk-1.28.2.zip
+      runs-on: ${{ matrix.os }}
+      steps:
+          - name: Clone
+            id: checkout
+            uses: actions/checkout@v6
+            with:
+                repository: ggerganov/llama.cpp
+                fetch-depth: 0
+                ref: '${{ github.event.inputs.llama_cpp_commit }}'
+
+          - name: Download dependencies - Linux
+            if: ${{ matrix.os == 'ubuntu-24.04' }}
+            shell: bash
+            run: |
+                cd /tmp
+                wget https://registrationcenter-download.intel.com/akdlm/IRC_NAS/56f7923a-adb8-43f3-8b02-2b60fcac8cab/intel-deep-learning-essentials-2025.3.3.16_offline.sh -O intel-deep-learning-essentials_offline.sh
+                sudo bash intel-deep-learning-essentials_offline.sh -s -a --silent --eula accept
+                wget -q "https://github.com/oneapi-src/level-zero/releases/download/v${{ env.LEVEL_ZERO_VERSION }}/level-zero_${{ env.LEVEL_ZERO_VERSION }}%2B${{ env.LEVEL_ZERO_UBUNTU_VERSION }}_amd64.deb" -O level-zero.deb
+                wget -q "https://github.com/oneapi-src/level-zero/releases/download/v${{ env.LEVEL_ZERO_VERSION }}/level-zero-devel_${{ env.LEVEL_ZERO_VERSION }}%2B${{ env.LEVEL_ZERO_UBUNTU_VERSION }}_amd64.deb" -O level-zero-devel.deb
+                sudo apt-get install -y ./level-zero.deb ./level-zero-devel.deb
+          - name: Build (Linux)
+            if: ${{ matrix.os == 'ubuntu-24.04' }}
+            run: |
+                source /opt/intel/oneapi/setvars.sh
+                mkdir build
+                cd build
+                cmake .. ${{ env.COMMON_DEFINE }} ${{ env.LINUX_RPATH_DEFINE }} -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icpx -DGGML_BACKEND_DL=ON -DGGML_OPENMP=OFF -DGGML_SYCL=ON -DGGML_SYCL_TARGET=INTEL -DGGML_SYCL_F16=ON
+                cmake --build . --config Release -j $(nproc) --target ggml ggml-base ggml-sycl llama mtmd
+                ls -R
+          - name: Upload llama artifacts (Linux)
+            if: ${{ matrix.os == 'ubuntu-24.04' }}
+            uses: actions/upload-artifact@v4
+            with:
+                path: ./build/bin/libllama.so
+                name: llama-bin-linux-sycl-x64.so
+                if-no-files-found: error
+          - name: Upload ggml artifacts (Linux)
+            if: ${{ matrix.os == 'ubuntu-24.04' }}
+            uses: actions/upload-artifact@v4
+            with:
+              path: ./build/bin/libggml.so
+              name: ggml-bin-linux-sycl-x64.so
+              if-no-files-found: error
+          - name: Upload ggml-base artifacts (Linux)
+            if: ${{ matrix.os == 'ubuntu-24.04' }}
+            uses: actions/upload-artifact@v4
+            with:
+                path: ./build/bin/libggml-base.so
+                name: ggml-base-bin-linux-sycl-x64.so
+                if-no-files-found: error
+          - name: Upload ggml-sycl artifacts (Linux)
+            if: ${{ matrix.os == 'ubuntu-24.04' }}
+            uses: actions/upload-artifact@v4
+            with:
+                path: ./build/bin/libggml-sycl.so
+                name: ggml-sycl-bin-linux-sycl-x64.so
+                if-no-files-found: error
+          - name: Upload mtmd artifacts (Linux)
+            if: ${{ matrix.os == 'ubuntu-24.04' }}
+            uses: actions/upload-artifact@v4
+            with:
+                path: ./build/bin/libmtmd.so
+                name: mtmd-bin-linux-sycl-x64.so
+                if-no-files-found: error
+
   compile-cublas:
     name: Compile (cublas)
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-22.04, windows-2022]
-        cuda: ['12.4.0']
+        cuda: ['12.4.0', '13.0.0']
+        include:
+          - cuda: '12.4.0'
+            win-sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev", "thrust", "visual_studio_integration"]'
+          - cuda: '13.0.0'
+            win-sub-packages: '["nvcc", "crt", "nvvm", "cudart", "cublas", "cublas_dev", "thrust", "visual_studio_integration"]'
     runs-on: ${{ matrix.os }}
     steps:
       - name: Clone
@@ -412,15 +504,15 @@ jobs:
           fetch-depth: 0
           ref: '${{ github.event.inputs.llama_cpp_commit }}'
 
-      - uses: Jimver/cuda-toolkit@v0.2.15
+      - uses: Jimver/cuda-toolkit@v0.2.36
         if: runner.os == 'Windows'
         id: cuda-toolkit-windows
         with:
           cuda: ${{ matrix.cuda }}
           method: 'network'
-          sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev", "thrust", "visual_studio_integration"]'
+          sub-packages: ${{ matrix.win-sub-packages }}
 
-      - uses: Jimver/cuda-toolkit@v0.2.15
+      - uses: Jimver/cuda-toolkit@v0.2.36
         if: runner.os == 'Linux'
         id: cuda-toolkit-linux
         with:
@@ -535,11 +627,11 @@ jobs:
             defines: '-DCMAKE_OSX_ARCHITECTURES=x86_64 -DGGML_METAL=OFF -DGGML_AVX=ON -DGGML_AVX2=ON'
             targets: '--target ggml ggml-base ggml-cpu ggml-blas llama mtmd'
           - build: 'x64-rosetta2'
-            defines: '-DCMAKE_OSX_ARCHITECTURES=x86_64 -DGGML_METAL=OFF -DGGML_AVX=OFF -DGGML_AVX2=OFF -DGGML_F16C=OFF -DGGML_BMI2=OFF'
+            defines: '-DCMAKE_OSX_ARCHITECTURES=x86_64 -DGGML_METAL=OFF -DGGML_AVX=OFF -DGGML_AVX2=OFF -DGGML_F16C=OFF -DGGML_BMI2=OFF -DGGML_SSE42=OFF -DCMAKE_C_FLAGS=-march=x86-64 -DCMAKE_CXX_FLAGS=-march=x86-64'
             targets: '--target ggml ggml-base ggml-cpu ggml-blas llama mtmd'
     env:
       MACOS_RPATH_DEFINE: "-DCMAKE_INSTALL_RPATH='@loader_path' -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON"
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v6
         with:
@@ -671,6 +763,7 @@ jobs:
       "compile-windows",
       "compile-windows-arm64",
       "compile-vulkan",
+      "compile-sycl",
       "compile-cublas",
       "compile-macos",
       "compile-android"
@@ -684,7 +777,7 @@ jobs:
       - name: Rearrange Files
         run: |
           # Make all directories at once
-          mkdir --parents deps/{noavx,avx,avx2,avx512,linux-arm64,musl-noavx,musl-avx,musl-avx2,musl-avx512,osx-arm64,osx-x64,osx-x64-rosetta2,cu12.4.0,vulkan,android-arm64-v8a,android-x86,android-x86_64,win-arm64}
+          mkdir --parents deps/{noavx,avx,avx2,avx512,linux-arm64,musl-noavx,musl-avx,musl-avx2,musl-avx512,osx-arm64,osx-x64,osx-x64-rosetta2,cu12.4.0,cu13.0.0,vulkan,sycl,android-arm64-v8a,android-x86,android-x86_64,win-arm64}
 
           # Linux
           cp artifacts/ggml-bin-linux-noavx-x64.so/libggml.so           deps/noavx/libggml.so
@@ -817,12 +910,31 @@ jobs:
           cp artifacts/llama-bin-win-cublas-cu12.4.0-x64.dll/llama.dll          deps/cu12.4.0/llama.dll
           cp artifacts/mtmd-bin-win-cublas-cu12.4.0-x64.dll/mtmd.dll            deps/cu12.4.0/mtmd.dll
 
+          cp artifacts/ggml-bin-win-cublas-cu13.0.0-x64.dll/ggml.dll            deps/cu13.0.0/ggml.dll
+          cp artifacts/ggml-base-bin-win-cublas-cu13.0.0-x64.dll/ggml-base.dll  deps/cu13.0.0/ggml-base.dll
+          cp artifacts/ggml-cuda-bin-win-cublas-cu13.0.0-x64.dll/ggml-cuda.dll  deps/cu13.0.0/ggml-cuda.dll
+          cp artifacts/llama-bin-win-cublas-cu13.0.0-x64.dll/llama.dll          deps/cu13.0.0/llama.dll
+          cp artifacts/mtmd-bin-win-cublas-cu13.0.0-x64.dll/mtmd.dll            deps/cu13.0.0/mtmd.dll
+
           # Linux CUDA
           cp artifacts/ggml-bin-linux-cublas-cu12.4.0-x64.so/libggml.so              deps/cu12.4.0/libggml.so
           cp artifacts/ggml-base-bin-linux-cublas-cu12.4.0-x64.so/libggml-base.so    deps/cu12.4.0/libggml-base.so
           cp artifacts/ggml-cuda-bin-linux-cublas-cu12.4.0-x64.so/libggml-cuda.so    deps/cu12.4.0/libggml-cuda.so
           cp artifacts/llama-bin-linux-cublas-cu12.4.0-x64.so/libllama.so            deps/cu12.4.0/libllama.so
           cp artifacts/mtmd-bin-linux-cublas-cu12.4.0-x64.so/libmtmd.so              deps/cu12.4.0/libmtmd.so
+
+          cp artifacts/ggml-bin-linux-cublas-cu13.0.0-x64.so/libggml.so              deps/cu13.0.0/libggml.so
+          cp artifacts/ggml-base-bin-linux-cublas-cu13.0.0-x64.so/libggml-base.so    deps/cu13.0.0/libggml-base.so
+          cp artifacts/ggml-cuda-bin-linux-cublas-cu13.0.0-x64.so/libggml-cuda.so    deps/cu13.0.0/libggml-cuda.so
+          cp artifacts/llama-bin-linux-cublas-cu13.0.0-x64.so/libllama.so            deps/cu13.0.0/libllama.so
+          cp artifacts/mtmd-bin-linux-cublas-cu13.0.0-x64.so/libmtmd.so              deps/cu13.0.0/libmtmd.so
+
+          # Linux SYCL
+          cp artifacts/ggml-bin-linux-sycl-x64.so/libggml.so                deps/sycl/libggml.so
+          cp artifacts/ggml-base-bin-linux-sycl-x64.so/libggml-base.so      deps/sycl/libggml-base.so
+          cp artifacts/ggml-sycl-bin-linux-sycl-x64.so/libggml-sycl.so      deps/sycl/libggml-sycl.so
+          cp artifacts/llama-bin-linux-sycl-x64.so/libllama.so              deps/sycl/libllama.so
+          cp artifacts/mtmd-bin-linux-sycl-x64.so/libmtmd.so                deps/sycl/libmtmd.so
 
           # Windows Vulkan
           cp artifacts/ggml-bin-win-vulkan-x64.dll/ggml.dll               deps/vulkan/ggml.dll
