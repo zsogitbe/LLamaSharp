@@ -2,8 +2,6 @@ using LLama.Batched;
 using LLama.Common;
 using LLama.Native;
 using LLama.Sampling;
-using System.Runtime.InteropServices;
-using Xunit.Abstractions;
 
 namespace LLama.Unittest
 {

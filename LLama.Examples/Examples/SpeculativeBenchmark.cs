@@ -1,6 +1,8 @@
 using LLama.Common;
 using LLama.Native;
+using Spectre.Console;
 using System.Diagnostics;
+using System.Text;
 
 namespace LLama.Examples.Examples
 {
@@ -10,12 +12,26 @@ namespace LLama.Examples.Examples
     /// </summary>
     public static class SpeculativeBenchmark
     {
+        /// <summary>
+        /// Captures timing, throughput, draft acceptance statistics, and generated text for a single benchmark pass.
+        /// </summary>
+        /// <param name="Name">Display label for the decoding strategy.</param>
+        /// <param name="TotalTokens">Total number of tokens generated.</param>
+        /// <param name="ElapsedSeconds">Total elapsed wall-clock time in seconds.</param>
+        /// <param name="TokensPerSecond">Average throughput in tokens per second.</param>
+        /// <param name="AcceptanceRate">Fraction of proposed draft tokens accepted (0.0 to 1.0).</param>
+        /// <param name="DraftTokensAccepted">Total proposed draft tokens accepted by the target model.</param>
+        /// <param name="DraftTokensProposed">Total draft tokens proposed during the run.</param>
+        /// <param name="Output">Full generated text produced during the benchmark pass.</param>
         public record BenchmarkResult(
             string Name,
             int TotalTokens,
             double ElapsedSeconds,
             double TokensPerSecond,
-            double AcceptanceRate
+            double AcceptanceRate,
+            int DraftTokensAccepted = 0,
+            int DraftTokensProposed = 0,
+            string Output = ""
         );
 
         public static async Task RunAsync(
@@ -26,30 +42,25 @@ namespace LLama.Examples.Examples
             int draftTokens = 16,
             bool useMtp = false)
         {
+            // Check if the user provided a distinct draft file (prevents accidental double-loading)
+            bool isSeparateDraft = !string.Equals(targetModelPath, draftModelPath, StringComparison.OrdinalIgnoreCase);
+            string draftDisplay = useMtp
+                ? (isSeparateDraft ? $"[Split MTP] {draftModelPath}" : "[Bundled MTP Self-Drafting]")
+                : draftModelPath;
+
             Console.WriteLine("==========================================================");
             Console.WriteLine("         LLAMASHARP SPECULATIVE DECODING BENCHMARK        ");
             Console.WriteLine("==========================================================");
             Console.WriteLine($"Target Model : {targetModelPath}");
-            Console.WriteLine($"Draft Model  : {(useMtp ? "[MTP Self-Drafting]" : draftModelPath)}");
+            Console.WriteLine($"Draft Model  : {draftDisplay}");
             Console.WriteLine($"Draft Budget : {draftTokens} tokens per burst");
             Console.WriteLine($"Target Tokens: {maxTokens} tokens");
             Console.WriteLine("----------------------------------------------------------\n");
 
             LLamaWeights? draftWeights = null;
 
-            // CRITICAL CONTEXT SETUP
-
-            // Check if the user provided a distinct draft file (prevents accidental double-loading)
-            bool isSeparateDraft = !string.Equals(targetModelPath, draftModelPath, StringComparison.OrdinalIgnoreCase);
-
-            // HARD CAP for ABI and memory safety (Max 31 drafts + 1 base = 32 ABI limit)
-            if (draftTokens > 31)
-            {
-                Console.ForegroundColor = ConsoleColor.Yellow;
-                Console.WriteLine($"\n[Warning] Requested {draftTokens} drafts exceeds the native ABI limit. Capping to 31.");
-                Console.ResetColor();
-                draftTokens = 31;
-            }
+            if (draftTokens <= 0)
+                throw new ArgumentOutOfRangeException(nameof(draftTokens), "Draft token budget must be greater than zero.");
 
             // First load the draft model that it can be fully loaded into the GPU.
             // Then, load the target model and distribute the layers as needed (GPUs, COU).
@@ -104,32 +115,53 @@ namespace LLama.Examples.Examples
 
             using var targetWeights = LLamaWeights.LoadFromFile(targetParams);
 
-            // MTP AUTO-DETECT
+            int detectedMtpHeads = 0;
+
+            // MTP AUTO-DETECT (works for both bundled MTP in targetWeights and split MTP in draftWeights)
             if (useMtp)
             {
-                int mtpHeads = 0;
-                foreach (var kvp in targetWeights.Metadata)
-                {
-                    if (kvp.Key.EndsWith("nextn_predict_layers"))
-                    {
-                        if (int.TryParse(kvp.Value, out int heads))
-                        {
-                            mtpHeads = heads;
-                            break;
-                        }
-                    }
-                }
+                detectedMtpHeads = NativeApi.llama_model_n_layer_nextn((draftWeights ?? targetWeights).NativeHandle.DangerousGetHandle());
+                if (detectedMtpHeads <= 0 && draftWeights != null)
+                    detectedMtpHeads = NativeApi.llama_model_n_layer_nextn(targetWeights.NativeHandle.DangerousGetHandle());
 
-                if (mtpHeads == 0)
+                if (detectedMtpHeads <= 0)
                 {
                     Console.ForegroundColor = ConsoleColor.Red;
-                    Console.WriteLine("\n[Error] MTP mode was requested, but the loaded model does not contain 'nextn_predict_layers' in its metadata.");
-                    Console.WriteLine("        This means the GGUF lacks the physical MTP projection heads required for self-drafting.");
-                    Console.WriteLine("        Please use an MTP-specific GGUF (e.g., Qwen3.6-35B-A3B-MTP-GGUF) or run Dual-Model speculation.");
+                    Console.WriteLine("\n[Error] MTP mode was requested, but neither the target nor draft GGUF exposes NextN/MTP layers (llama_model_n_layer_nextn == 0).");
+                    Console.WriteLine("        Please select an MTP-enabled GGUF (e.g., Qwen3.5-4B-MTP-Q4_K_M.gguf or Gemma-4 + mtp-gemma-4),");
+                    Console.WriteLine("        or switch to Dual-Model speculation with a smaller same-family draft model.");
                     Console.ResetColor();
 
-                    // Gracefully abort the benchmark 
+                    draftWeights?.Dispose();
                     return;
+                }
+
+                Console.WriteLine($"[Info] Detected {detectedMtpHeads} NextN/MTP head(s).");
+            }
+            else if (draftWeights != null)
+            {
+                // Early sanity check for Dual-Model tokenizer & vocabulary compatibility
+                targetWeights.Metadata.TryGetValue("tokenizer.ggml.model", out var tgtTok);
+                draftWeights.Metadata.TryGetValue("tokenizer.ggml.model", out var dftTok);
+                targetWeights.Metadata.TryGetValue("tokenizer.ggml.pre", out var tgtPre);
+                draftWeights.Metadata.TryGetValue("tokenizer.ggml.pre", out var dftPre);
+
+                int tgtVocabSize = targetWeights.Vocab.Count;
+                int dftVocabSize = draftWeights.Vocab.Count;
+
+                bool mismatch =
+                    !string.Equals(tgtTok, dftTok, StringComparison.OrdinalIgnoreCase) ||
+                    !string.Equals(tgtPre, dftPre, StringComparison.OrdinalIgnoreCase) ||
+                    tgtVocabSize != dftVocabSize;
+
+                if (mismatch)
+                {
+                    Console.ForegroundColor = ConsoleColor.Yellow;
+                    Console.WriteLine($"\n[Warning] Tokenizer/vocab mismatch detected!");
+                    Console.WriteLine($"          Target: model='{tgtTok}', pre='{tgtPre}', vocab={tgtVocabSize}");
+                    Console.WriteLine($"          Draft : model='{dftTok}', pre='{dftPre}', vocab={dftVocabSize}");
+                    Console.WriteLine("          Dual-Model speculation requires target and draft models from the same tokenizer family.");
+                    Console.ResetColor();
                 }
             }
             #endregion
@@ -168,7 +200,22 @@ namespace LLama.Examples.Examples
 
                 var baselineResult = await MeasureInferenceAsync("Standard Autoregressive", standardExecutor, prompt, maxTokens);
 
-                PrintResultsTable(baselineResult, speculativeResult);
+                string modeLabel = useMtp
+                    ? (isSeparateDraft ? "Split MTP" : "Bundled MTP")
+                    : "Dual-Model (Draft-Simple)";
+
+                PrintFullReport(
+                    modeLabel: modeLabel,
+                    targetModelPath: targetModelPath,
+                    draftDisplay: draftDisplay,
+                    detectedMtpHeads: detectedMtpHeads,
+                    targetParams: targetParams,
+                    draftParams: draftParams,
+                    draftTokens: draftTokens,
+                    maxTokens: maxTokens,
+                    prompt: prompt,
+                    baseline: baselineResult,
+                    speculative: speculativeResult);
             }
             finally
             {
@@ -176,31 +223,71 @@ namespace LLama.Examples.Examples
             }
         }
 
+        /// <summary>
+        /// Runs an interactive console wizard to configure and execute a speculative decoding benchmark.
+        /// </summary>
         public static async Task RunInteractiveAsync()
         {
-            Console.WriteLine("=== Speculative Decoding Benchmark ===");
+            const string ModeDualModel = "1. Dual-Model (Large Target + Smaller Same-Family Draft — e.g. Llama-3-8B + Llama-3.2-1B, Qwen3.6-35B + Qwen3.5-0.8B)";
+            const string ModeBundledMtp = "2. Bundled MTP (Single GGUF with built-in NextN heads — e.g. Qwen3.5-4B-MTP, DeepSeek-R1-MTP)";
+            const string ModeSplitMtp = "3. Split MTP (Target GGUF + Separate MTP Head GGUF — e.g. gemma-4-12b-it + mtp-gemma-4-12b-it)";
 
-            // 1. Get Target Model
-            Console.WriteLine("Select Target Model:");
-            var targetModelPath = UserSettings.GetModelPath();
+            Spectre.Console.AnsiConsole.MarkupLine("[bold cyan]=== Speculative Decoding Benchmark ===[/]");
+            Spectre.Console.AnsiConsole.MarkupLine("[grey]Compares Standard Autoregressive decoding against Speculative Decoding using your selected model setup.[/]\n");
 
-            // 2. Ask for Parameters dynamically
-            var useMtp = Spectre.Console.AnsiConsole.Confirm("Does this model support MTP (e.g. Qwen3.5 / DeepSeek-R1 / Gemma-4)?");
+            // 1. Choose speculation mode FIRST so the user knows which GGUF files are expected
+            var mode = Spectre.Console.AnsiConsole.Prompt(
+                new Spectre.Console.SelectionPrompt<string>()
+                    .Title("[bold]Select Speculative Decoding Mode:[/]")
+                    .AddChoices(ModeDualModel, ModeBundledMtp, ModeSplitMtp));
 
-            // It will default to 4 if MTP is true (good for Gemma), or 16 if MTP is false
-            var draftTokens = Spectre.Console.AnsiConsole.Ask<int>("Enter draft tokens budget per burst:", useMtp ? 4 : 16);
-            var maxTokens = Spectre.Console.AnsiConsole.Ask<int>("Enter max tokens to generate for the benchmark:", 128);
+            bool useMtp = mode != ModeDualModel;
+            bool needsSeparateDraft = mode != ModeBundledMtp;
 
-            // 3. Handle Draft Model path (Remove the !useMtp restriction)
-            string draftModelPath = targetModelPath; // Default to self-speculation
-
-            if (Spectre.Console.AnsiConsole.Confirm("Do you want to use a separate draft model? (Yes for Gemma 4 / Dual-Model, No for Qwen/DeepSeek)"))
+            // 2. Prompt for Target Model with mode-specific guidance
+            Spectre.Console.AnsiConsole.MarkupLine(mode switch
             {
-                Console.WriteLine("Select Draft Model:");
-                draftModelPath = UserSettings.GetModelPath();
+                ModeDualModel => "\n[bold]Step 1/2 — Target Model (Large Primary Model):[/]\n[grey]Example: Meta-Llama-3-8B-Instruct-Q8_0.gguf or Qwen3.6-35B-A3B-UD-Q5_K_M.gguf[/]",
+                ModeBundledMtp => "\n[bold]Step 1/1 — Target MTP Model (Single GGUF with NextN heads):[/]\n[grey]Example: Qwen3.5-4B-MTP-Q4_K_M.gguf[/]",
+                _ => "\n[bold]Step 1/2 — Target Model (Primary Model):[/]\n[grey]Example: gemma-4-12b-it-UD-Q4_K_XL.gguf[/]"
+            });
+            var targetModelPath = UserSettings.GetSpeculativeTargetModelPath();
+
+            // 3. Prompt for Draft / Split-MTP Model only when required by the selected mode
+            string draftModelPath = targetModelPath;
+            if (needsSeparateDraft)
+            {
+                if (mode == ModeDualModel)
+                {
+                    Spectre.Console.AnsiConsole.MarkupLine("\n[bold]Step 2/2 — Draft Model (Smaller Model with SAME Tokenizer/Vocab as Target):[/]");
+                    Spectre.Console.AnsiConsole.MarkupLine("[grey]Example: Llama-3.2-1B-Instruct-Q4_0.gguf (for Llama-3) or Qwen3.5-0.8B / Qwen3.5-2B (for Qwen3.5/3.6)[/]");
+                    draftModelPath = UserSettings.GetSpeculativeDraftModelPath("DRAFT model.gguf (smaller same-vocab model)");
+                }
+                else
+                {
+                    Spectre.Console.AnsiConsole.MarkupLine("\n[bold]Step 2/2 — Separate MTP Head Model:[/]");
+                    Spectre.Console.AnsiConsole.MarkupLine("[grey]Example: mtp-gemma-4-12b-it-F16.gguf[/]");
+                    draftModelPath = UserSettings.GetSpeculativeDraftModelPath("MTP head model.gguf");
+                }
             }
 
-            // 4. Run the benchmark with the explicitly chosen parameters
+            // 4. Ask for burst budget & token count with practical defaults
+            int defaultDraftTokens = mode switch
+            {
+                ModeBundledMtp => 1,
+                ModeSplitMtp => 4,
+                _ => 5
+            };
+
+            var draftTokens = Spectre.Console.AnsiConsole.Ask<int>(
+                "Enter draft tokens budget per burst (recommended: 4-6 Dual-Model, 1-4 MTP):",
+                defaultDraftTokens);
+
+            var maxTokens = Spectre.Console.AnsiConsole.Ask<int>(
+                "Enter max tokens to generate for the benchmark:",
+                128);
+
+            // 5. Run the benchmark
             await RunAsync(
                 targetModelPath: targetModelPath,
                 draftModelPath: draftModelPath,
@@ -213,49 +300,113 @@ namespace LLama.Examples.Examples
         private static async Task<BenchmarkResult> MeasureInferenceAsync(string testName, StatelessExecutor executor, string prompt, int maxTokens)
         {
             var inferenceParams = new InferenceParams { MaxTokens = maxTokens };
+            var outputBuilder = new StringBuilder();
             int tokenCount = 0;
             var stopwatch = Stopwatch.StartNew();
 
             await foreach (var token in executor.InferAsync(prompt, inferenceParams))
             {
+                outputBuilder.Append(token);
                 tokenCount++;
             }
 
             stopwatch.Stop();
             double elapsedSeconds = stopwatch.Elapsed.TotalSeconds;
-            double tps = tokenCount / elapsedSeconds;
+            double tps = elapsedSeconds > 0 ? tokenCount / elapsedSeconds : 0;
 
-            double acceptanceRate = executor.AcceptanceRate;
-
-            return new BenchmarkResult(testName, tokenCount, elapsedSeconds, tps, acceptanceRate);
+            return new BenchmarkResult(
+                Name: testName,
+                TotalTokens: tokenCount,
+                ElapsedSeconds: elapsedSeconds,
+                TokensPerSecond: tps,
+                AcceptanceRate: executor.AcceptanceRate,
+                DraftTokensAccepted: executor.TotalDraftTokensAccepted,
+                DraftTokensProposed: executor.TotalDraftTokensProposed,
+                Output: outputBuilder.ToString());
         }
 
-        private static void PrintResultsTable(BenchmarkResult baseline, BenchmarkResult speculative)
+        /// <summary>
+        /// Prints a consolidated benchmark report including models, configuration options, performance metrics, input prompt, and generated outputs.
+        /// </summary>
+        private static void PrintFullReport(
+            string modeLabel,
+            string targetModelPath,
+            string draftDisplay,
+            int detectedMtpHeads,
+            ModelParams targetParams,
+            ModelParams draftParams,
+            int draftTokens,
+            int maxTokens,
+            string prompt,
+            BenchmarkResult baseline,
+            BenchmarkResult speculative)
         {
-            double speedupRatio = speculative.TokensPerSecond / baseline.TokensPerSecond;
+            double speedupRatio = baseline.TokensPerSecond > 0
+                ? speculative.TokensPerSecond / baseline.TokensPerSecond
+                : 0;
             double percentageGain = (speedupRatio - 1.0) * 100.0;
+            bool exactOutputMatch = string.Equals(baseline.Output, speculative.Output, StringComparison.Ordinal);
 
-            Console.WriteLine("\n==========================================================");
-            Console.WriteLine("                    BENCHMARK RESULTS                     ");
-            Console.WriteLine("==========================================================");
-            Console.WriteLine($"{"Strategy",-28} | {"Tokens",-8} | {"Time (s)",-10} | {"Tokens/sec",-10} | {"Accept %",-8}");
-            Console.WriteLine(new string('-', 75));
-            Console.WriteLine($"{baseline.Name,-28} | {baseline.TotalTokens,-8} | {baseline.ElapsedSeconds,-10:F2} | {baseline.TokensPerSecond,-10:F2} | {"N/A",-8}");
-            Console.WriteLine($"{speculative.Name,-28} | {speculative.TotalTokens,-8} | {speculative.ElapsedSeconds,-10:F2} | {speculative.TokensPerSecond,-10:F2} | {speculative.AcceptanceRate * 100,5:F1}%");
-            Console.WriteLine(new string('-', 75));
+            string divider = new string('=', 80);
+            string subDivider = new string('-', 80);
+
+            Console.WriteLine();
+            Console.WriteLine(divider);
+            Console.WriteLine("                  FULL SPECULATIVE BENCHMARK REPORT                             ");
+            Console.WriteLine(divider);
+
+            Console.WriteLine("MODELS & MODE");
+            Console.WriteLine($"  Mode         : {modeLabel}");
+            Console.WriteLine($"  Target Model : {targetModelPath}");
+            Console.WriteLine($"  Draft Model  : {draftDisplay}");
+            if (detectedMtpHeads > 0)
+                Console.WriteLine($"  MTP Heads    : {detectedMtpHeads}");
+
+            Console.WriteLine(subDivider);
+            Console.WriteLine("OPTIONS USED");
+            Console.WriteLine($"  Draft Budget : {draftTokens} tokens/burst | Max Tokens: {maxTokens}");
+            Console.WriteLine($"  Target Params: Ctx={targetParams.ContextSize}, Batch={targetParams.BatchSize}/{targetParams.UBatchSize}, " +
+                              $"GpuLayers={targetParams.GpuLayerCount}, MainGpu={targetParams.MainGpu}, Split={targetParams.SplitMode}, " +
+                              $"SeqMax={targetParams.SeqMax}, KVUnified={targetParams.KVUnified}, SwaFull={targetParams.SwaFull}, LoadMTP={targetParams.LoadMTP}");
+            Console.WriteLine($"  Draft Params : Ctx={draftParams.ContextSize}, Batch={draftParams.BatchSize}/{draftParams.UBatchSize}, " +
+                              $"GpuLayers={draftParams.GpuLayerCount}, MainGpu={draftParams.MainGpu}, Split={draftParams.SplitMode}, " +
+                              $"SeqMax={draftParams.SeqMax}, CtxType={draftParams.ContextType}, KVUnified={draftParams.KVUnified}, SwaFull={draftParams.SwaFull}, LoadMTP={draftParams.LoadMTP}");
+
+            Console.WriteLine(subDivider);
+            Console.WriteLine("PERFORMANCE RESULTS");
+            Console.WriteLine($"{"Strategy",-26} | {"Tokens",-6} | {"Time (s)",-8} | {"Tok/s",-8} | {"Drafts",-11} | {"Accept %",-8}");
+            Console.WriteLine(subDivider);
+            Console.WriteLine($"{baseline.Name,-26} | {baseline.TotalTokens,-6} | {baseline.ElapsedSeconds,-8:F2} | {baseline.TokensPerSecond,-8:F2} | {"N/A",-11} | {"N/A",-8}");
+            Console.WriteLine($"{speculative.Name,-26} | {speculative.TotalTokens,-6} | {speculative.ElapsedSeconds,-8:F2} | {speculative.TokensPerSecond,-8:F2} | " +
+                              $"{$"{speculative.DraftTokensAccepted}/{speculative.DraftTokensProposed}",-11} | {speculative.AcceptanceRate * 100,6:F1}%");
+            Console.WriteLine(subDivider);
 
             if (speedupRatio >= 1.0)
             {
                 Console.ForegroundColor = ConsoleColor.Green;
-                Console.WriteLine($"Performance Result: {speedupRatio:F2}x Speedup (+{percentageGain:F1}%)");
+                Console.WriteLine($"  Performance  : {speedupRatio:F2}x Speedup (+{percentageGain:F1}%)");
             }
             else
             {
                 Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine($"Performance Result: {speedupRatio:F2}x Slowdown ({percentageGain:F1}%)");
+                Console.WriteLine($"  Performance  : {speedupRatio:F2}x Slowdown ({percentageGain:F1}%)");
             }
             Console.ResetColor();
-            Console.WriteLine("==========================================================\n");
+            Console.WriteLine($"  Output Parity: {(exactOutputMatch ? "EXACT MATCH (Baseline == Speculative)" : "DIFFERS (check sampling/token limit)")}");
+
+            Console.WriteLine(subDivider);
+            Console.WriteLine("INPUT PROMPT");
+            Console.WriteLine(prompt);
+
+            Console.WriteLine(subDivider);
+            Console.WriteLine("OUTPUT — STANDARD AUTOREGRESSIVE");
+            Console.WriteLine(baseline.Output);
+
+            Console.WriteLine(subDivider);
+            Console.WriteLine($"OUTPUT — {speculative.Name.ToUpperInvariant()}");
+            Console.WriteLine(speculative.Output);
+            Console.WriteLine(divider);
+            Console.WriteLine();
         }
     }
 }

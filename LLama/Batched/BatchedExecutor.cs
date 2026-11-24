@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 using LLama.Abstractions;
+using LLama.Common;
 using LLama.Exceptions;
 using LLama.Native;
 
@@ -147,11 +148,16 @@ public sealed class BatchedExecutor
     /// <para>In Dual-Model speculation, this context executes the smaller draft model. In Multi-Token Prediction (MTP) mode, it executes the MTP projection heads using the primary target model's weights.</para>
     /// </summary>
     public LLamaContext? DraftContext { get; }
+
     /// <summary>
-    /// The internal native wrapper that orchestrates the speculative verification loop, handling draft proposals, target evaluations, and sequence rollbacks.
+    /// The managed speculative decoder orchestrating draft proposals, target verification, and sequence rollbacks.
     /// </summary>
     private readonly LLama.Speculative.SpeculativeDecoder? _specDecoder;
+    private readonly bool _useMtp;
 
+    internal void NotifySequenceRemoved(LLamaSeqId seqId) => _specDecoder?.RemoveSequence(seqId);
+
+    internal void NotifySequenceForked(LLamaSeqId srcSeqId, LLamaSeqId dstSeqId) => _specDecoder?.ForkSequence(srcSeqId, dstSeqId);
 
     /// <summary>
     /// Creates a new batched executor capable of processing multiple concurrent conversation streams, with optional multimodal (CLIP) and speculative decoding acceleration.
@@ -161,10 +167,10 @@ public sealed class BatchedExecutor
     /// <param name="model">The weights of the primary target model.</param>
     /// <param name="contextParams">The context parameters used to initialize the primary target context.</param>
     /// <param name="clipModel">The optional CLIP model weights to enable multimodal (image-to-text) capabilities.</param>
-    /// <param name="draftModel">The weights of the draft model. <br/><b>Important:</b> In MTP mode, the executor will internally re-use the target <paramref name="model"/> weights for the draft context, therefore this may be <c>null</c>.</param>
-    /// <param name="draftParams">The context parameters for the draft model. In MTP mode, ensure the <c>ContextType</c> property is explicitly set to <c>LLamaContextType.Mtp</c>.</param>
-    /// <param name="draftTokens">The budget of draft tokens to propose per burst. Keep this modest (e.g., 2-4 for Dual-Model) or match the exact number of projection heads for MTP models. Set to 0 to disable speculation.</param>
-    /// <param name="useMtp">Set to <c>true</c> to enable Multi-Token Prediction (Self-Speculation) for supported architectures (e.g., DeepSeek-R1, Qwen3.5-MTP). Requires <c>LoadMtp = true</c> in the target model parameters.</param>
+    /// <param name="draftModel">The weights of the draft model. <br/><b>Important:</b> In MTP mode, the executor re-uses the target <paramref name="model"/> weights when this is <c>null</c>.</param>
+    /// <param name="draftParams">The context parameters for the draft model. In MTP mode, <see cref="IContextParams.ContextType"/> and <see cref="IContextParams.CtxOther"/> are configured automatically when omitted.</param>
+    /// <param name="draftTokens">The budget of draft tokens to propose per burst. Keep this modest (e.g., 2-4 for Dual-Model) or match the available NextN heads for MTP models. Set to 0 to disable speculation.</param>
+    /// <param name="useMtp">Set to <c>true</c> to enable Multi-Token Prediction (Self-Speculation) for supported architectures (e.g., DeepSeek-R1, Qwen3.5-MTP). Requires <c>LoadMTP = true</c> in the target model parameters.</param>
     public BatchedExecutor(
         LLamaWeights model,
         IContextParams contextParams,
@@ -178,21 +184,40 @@ public sealed class BatchedExecutor
         Context = model.CreateContext(contextParams);
         ClipModel = clipModel;
         Epoch = 1;
+        _useMtp = useMtp;
 
         if (draftTokens > 0)
         {
+            LLamaWeights activeDraftWeights = draftModel ?? model;
+            IContextParams activeDraftParams = draftParams ?? contextParams;
+
             if (useMtp)
             {
-                // MTP uses the target context directly. No second context needed!
-                _specDecoder = new LLama.Speculative.SpeculativeDecoder(Context.NativeHandle, Context.NativeHandle, draftTokens, useMtp);
+                // Upstream llama.cpp v1.0 requires a dedicated LLAMA_CONTEXT_TYPE_MTP draft context paired via ctx_other.
+                IntPtr targetHandle = Context.NativeHandle.DangerousGetHandle();
+                if (activeDraftParams is ModelParams mp)
+                {
+                    activeDraftParams = mp with
+                    {
+                        ContextType = LLamaContextType.Mtp,
+                        CtxOther = targetHandle,
+                    };
+                }
+                else
+                {
+                    if (activeDraftParams.ContextType != LLamaContextType.Mtp)
+                    {
+                        throw new ArgumentException(
+                            "In MTP mode, custom IContextParams implementations must set ContextType = LLamaContextType.Mtp.",
+                            nameof(draftParams));
+                    }
+
+                    activeDraftParams.CtxOther = targetHandle;
+                }
             }
-            else
-            {
-                // Standard draft models require their own distinct context
-                LLamaWeights activeDraftWeights = draftModel ?? model;
-                DraftContext = activeDraftWeights.CreateContext(draftParams ?? contextParams);
-                _specDecoder = new LLama.Speculative.SpeculativeDecoder(Context.NativeHandle, DraftContext.NativeHandle, draftTokens, useMtp);
-            }
+
+            DraftContext = activeDraftWeights.CreateContext(activeDraftParams);
+            _specDecoder = new LLama.Speculative.SpeculativeDecoder(Context.NativeHandle, DraftContext.NativeHandle, draftTokens, useMtp);
         }
     }
 
@@ -292,7 +317,7 @@ public sealed class BatchedExecutor
             DecodeResult status;
 
             // speculative
-            // Only use speculative decoding if the batch is exactly 1 token (Generation Phase)
+            // Use speculative decoding during single-token generation steps
             if (_specDecoder != null && next is TokenBatch tb && tb.Batch.TokenCount == 1)
             {
                 try
@@ -302,19 +327,19 @@ public sealed class BatchedExecutor
 
                     foreach (var result in results)
                     {
-                        if (result.count > 0)
+                        if (result.Count > 0)
                         {
                             lock (_activeSequenceIds)
                             {
-                                if (_activeConversations.TryGetValue((LLamaSeqId)result.seq_id, out var conv))
-                                    conv.EnqueueSpeculativeTokens(result.tokens, result.count);
+                                if (_activeConversations.TryGetValue(result.SequenceId, out var conv))
+                                    conv.EnqueueSpeculativeTokens(result.Tokens, result.Count);
                             }
                         }
                     }
                 }
-                catch (LLamaDecodeError)
+                catch (LLamaDecodeError ex)
                 {
-                    status = DecodeResult.DecodeFailed;
+                    status = ex.ReturnCode;
                 }
             }
             else
@@ -322,10 +347,17 @@ public sealed class BatchedExecutor
                 // STANDARD EXECUTION (Prefill Phase / Prompts)
                 status = await next.DecodeAsync(Context, cancellation);
 
-                // If this is a prompt, we MUST manually sync the draft model's KV cache so it doesn't fall behind!
-                if (status == DecodeResult.Ok && DraftContext != null && _specDecoder != null && next is TokenBatch tbPrompt)
+                // Keep draft/MTP context synchronized with prompt prefill
+                if (status == DecodeResult.Ok && _specDecoder != null && next is TokenBatch tbPrompt)
                 {
-                    await DraftContext.DecodeAsync(tbPrompt.Batch, cancellation);
+                    if (_useMtp)
+                    {
+                        _specDecoder.ProcessPrompt(tbPrompt.Batch);
+                    }
+                    else if (DraftContext != null)
+                    {
+                        await DraftContext.DecodeAsync(tbPrompt.Batch, cancellation);
+                    }
                 }
             }
 

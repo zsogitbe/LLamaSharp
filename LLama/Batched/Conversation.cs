@@ -31,6 +31,15 @@ public sealed class Conversation
     private int[] _batchSampleIndices = new int[4];
     private int _batchSampleCount;
 
+    // speculative
+    private int _speculativeTokensToIgnore = 0;
+    private readonly Queue<LLamaToken> _speculativeTokens = new();
+
+    /// <summary>
+    /// indicates if speculative tokens are included
+    /// </summary>
+    public bool HasSpeculativeTokens => _speculativeTokens.Count > 0;
+
     /// <summary>
     /// The executor which this conversation belongs to
     /// </summary>
@@ -129,8 +138,10 @@ public sealed class Conversation
         _pendingMtmdSequence?.Dispose();
         _pendingMtmdSequence = null;
 
-        // Remove this conversation from the KV cache
+        // Remove this conversation from the KV cache (and draft KV cache if speculative decoding is active)
         Executor.Context.NativeHandle.MemorySequenceRemove(ConversationId, -1, -1);
+        Executor.DraftContext?.NativeHandle.MemorySequenceRemove(ConversationId, -1, -1);
+        Executor.NotifySequenceRemoved(ConversationId);
 
         // Release the ID back to the pool to be reused!
         Executor.ReleaseSequenceId(ConversationId);
@@ -177,8 +188,13 @@ public sealed class Conversation
         // conversation doesn't share logits with this one.
         _forked = true;
 
-        // Assign tokens to the new sequence
+        // speculative
+        Executor.RegisterConversation(c);
+
+        // Assign tokens to the new sequence (and mirror to draft KV cache / MTP state when active)
         Executor.Context.NativeHandle.MemorySequenceCopy(ConversationId, c.ConversationId, 0, _end);
+        Executor.DraftContext?.NativeHandle.MemorySequenceCopy(ConversationId, c.ConversationId, 0, _end);
+        Executor.NotifySequenceForked(ConversationId, c.ConversationId);
 
         return c;
     }
@@ -322,6 +338,13 @@ public sealed class Conversation
         if (tokens.Length == 0)
             return;
 
+        // speculative skip logic: consume already-verified tokens so they are not re-evaluated
+        int skipCount = Math.Min(tokens.Length, _speculativeTokensToIgnore);
+        _speculativeTokensToIgnore -= skipCount;
+        tokens = tokens.Slice(skipCount);
+        if (tokens.Length == 0)
+            return;
+
         // Add the prompt to the batch
         if (allLogits)
         {
@@ -368,6 +391,12 @@ public sealed class Conversation
 
         if (Executor.ClipModel is null)
             throw new InvalidOperationException("This conversation is not configured for multimodal prompts.");
+
+        // speculative
+        // If a multimodal prompt interrupts an active speculative burst, we must wipe the queued tokens 
+        // and reset the ignore counter to prevent context corruption in the native engine.
+        _speculativeTokens.Clear();
+        _speculativeTokensToIgnore = 0;
 
         var prompt = BuildMtmdPrompt(text, embeds.Length);
 
@@ -438,6 +467,10 @@ public sealed class Conversation
     {
         AssertCanBePrompted();
 
+        // speculative - clear unconsumed tokens if the user interrupts with raw embeddings
+        _speculativeTokens.Clear();
+        _speculativeTokensToIgnore = 0;
+
         var dim = Executor.Model.EmbeddingSize;
         var count = embeddings.Length / dim;
         if (count * dim != embeddings.Length)
@@ -474,6 +507,11 @@ public sealed class Conversation
 
         if (RequiresInference)
             throw new CannotModifyWhileRequiresInferenceException();
+
+        // speculative: invalidate buffered tokens and cached MTP hidden states
+        _speculativeTokens.Clear();
+        _speculativeTokensToIgnore = 0;
+        Executor.NotifySequenceRemoved(ConversationId);
 
         // do whatever the modification is
         _end = modifier.Invoke(_end, new KvAccessor(this));
@@ -546,6 +584,7 @@ public sealed class Conversation
         public void Remove(LLamaPos start, LLamaPos end)
         {
             _conversation.Executor.Context.NativeHandle.MemorySequenceRemove(_conversation.ConversationId, start, end);
+            _conversation.Executor.DraftContext?.NativeHandle.MemorySequenceRemove(_conversation.ConversationId, start, end);
         }
 
         /// <summary>
@@ -560,6 +599,7 @@ public sealed class Conversation
 
             var end = start.Value + count;
             _conversation.Executor.Context.NativeHandle.MemorySequenceRemove(_conversation.ConversationId, start, end);
+            _conversation.Executor.DraftContext?.NativeHandle.MemorySequenceRemove(_conversation.ConversationId, start, end);
         }
         #endregion
 
@@ -575,6 +615,7 @@ public sealed class Conversation
         public void Add(LLamaPos start, LLamaPos end, int delta)
         {
             _conversation.Executor.Context.NativeHandle.MemorySequenceAdd(_conversation.ConversationId, start, end, delta);
+            _conversation.Executor.DraftContext?.NativeHandle.MemorySequenceAdd(_conversation.ConversationId, start, end, delta);
         }
         #endregion
 
@@ -592,6 +633,7 @@ public sealed class Conversation
                 throw new ArgumentOutOfRangeException(nameof(divisor));
 
             _conversation.Executor.Context.NativeHandle.MemorySequenceDivide(_conversation.ConversationId, start, end, divisor);
+            _conversation.Executor.DraftContext?.NativeHandle.MemorySequenceDivide(_conversation.ConversationId, start, end, divisor);
         }
         #endregion
     }
@@ -766,6 +808,41 @@ public sealed class Conversation
         internal State()
         {
         }
+    }
+    #endregion
+
+    #region speculative
+    /// <summary>
+    /// Enqueues verified speculative tokens produced for this conversation and advances sequence position tracking.
+    /// </summary>
+    /// <param name="tokens">The verified token array.</param>
+    /// <param name="count">The number of valid tokens in <paramref name="tokens"/>.</param>
+    internal void EnqueueSpeculativeTokens(LLamaToken[] tokens, int count)
+    {
+        for (int i = 0; i < count; i++)
+        {
+            _speculativeTokens.Enqueue(tokens[i]);
+        }
+
+        if (count > 1)
+        {
+            _speculativeTokensToIgnore += (count - 1);
+            _end = _end.Value + (count - 1);
+        }
+    }
+
+    /// <summary>
+    /// Dequeues the next pre-verified speculative token for this conversation.
+    /// </summary>
+    /// <returns>The next verified <see cref="LLamaToken"/>.</returns>
+    /// <exception cref="ObjectDisposedException">Thrown if the conversation or executor has been disposed.</exception>
+    /// <exception cref="InvalidOperationException">Thrown if no speculative tokens are currently queued.</exception>
+    public LLamaToken DequeueSpeculativeToken()
+    {
+        AssertNotDisposed();
+        if (_speculativeTokens.Count == 0)
+            throw new InvalidOperationException("No speculative tokens available.");
+        return _speculativeTokens.Dequeue();
     }
     #endregion
 }

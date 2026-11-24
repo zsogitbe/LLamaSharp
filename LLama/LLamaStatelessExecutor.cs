@@ -119,18 +119,36 @@ namespace LLama
             Context = context;
 
             #region speculative
-            if (_draftTokens > 0 && _useMtp && _draftParams != null)
+            IContextParams? effectiveDraftParams = _draftParams;
+            if (_draftTokens > 0 && _useMtp && effectiveDraftParams != null)
             {
-                // Inject the target context's memory pointer into the draft context!
-                // This allows the native MTP projection head to read the target's hidden states.
-                _draftParams.CtxOther = Context.NativeHandle.DangerousGetHandle();
+                // Pair the MTP draft context with the target context's hidden states without mutating caller-owned ModelParams.
+                IntPtr targetHandle = Context.NativeHandle.DangerousGetHandle();
+                if (effectiveDraftParams is ModelParams mp)
+                {
+                    effectiveDraftParams = mp with
+                    {
+                        ContextType = LLamaContextType.Mtp,
+                        CtxOther = targetHandle,
+                    };
+                }
+                else
+                {
+                    if (effectiveDraftParams.ContextType != LLamaContextType.Mtp)
+                    {
+                        throw new ArgumentException(
+                            "In MTP mode, custom IContextParams implementations must set ContextType = LLamaContextType.Mtp.");
+                    }
+
+                    effectiveDraftParams.CtxOther = targetHandle;
+                }
             }
 
             // Allow separate draft models to be used alongside MTP routing for models like Gemma 4
             LLamaWeights activeDraftWeights = _draftWeights ?? _weights;
 
             using var draftContext = (_draftTokens > 0)
-                ? activeDraftWeights.CreateContext(_draftParams!, _logger)
+                ? activeDraftWeights.CreateContext(effectiveDraftParams!, _logger)
                 : null;
 
             using var specDecoder = (draftContext != null)
@@ -179,11 +197,18 @@ namespace LLama
             if (r != DecodeResult.Ok)
                 throw new LLamaDecodeError(r);
 
-            // Sync the Draft Model's KV cache with the prompt so it aligns with the Target Model
-            if (draftContext != null && !_useMtp)
+            // Sync the Draft Model's KV cache (Dual-Model) or capture initial NextN hidden state & warm KV (MTP)
+            if (specDecoder != null)
             {
-                var draftBatch = new LLamaBatch();
-                await draftContext.DecodeAsync(tokens, LLamaSeqId.Zero, draftBatch, 0);
+                if (_useMtp)
+                {
+                    specDecoder.ProcessPrompt(_batch);
+                }
+                else if (draftContext != null)
+                {
+                    var draftBatch = new LLamaBatch();
+                    await draftContext.DecodeAsync(tokens, LLamaSeqId.Zero, draftBatch, 0);
+                }
             }
 
             // Begin loop, evaluating one token at a time
@@ -220,9 +245,9 @@ namespace LLama
                     var results = specDecoder.Decode(_batch);
                     _batch.Clear();
 
-                    int rawAcceptedCount = (results.Length > 0) ? results[0].count : 0;
+                    int rawAcceptedCount = (results.Length > 0) ? results[0].Count : 0;
 
-                    // The native engine returns (Drafts Accepted + 1 Target Token). 
+                    // The speculative engine returns (Drafts Accepted + 1 Target Token). 
                     // We subtract 1 to get the true drafts, and clamp it between 0 and our draft budget.
                     int trueDraftsAccepted = 0;
                     if (rawAcceptedCount > 0)
@@ -239,12 +264,12 @@ namespace LLama
 
                     if (acceptedCount > 0)
                     {
-                        var acceptedTokens = results[0].tokens.Take(acceptedCount).ToArray();
+                        var acceptedTokens = results[0].Tokens;
                         bool shouldStop = false;
 
-                        foreach (var rawToken in acceptedTokens)
+                        for (int idx = 0; idx < acceptedCount; idx++)
                         {
-                            var token = (LLamaToken)rawToken;
+                            var token = acceptedTokens[idx];
                             if (token.IsEndOfGeneration(_weights.Vocab))
                             {
                                 shouldStop = true;
@@ -259,7 +284,7 @@ namespace LLama
                             // Keep our context-shifting tracker accurate!
                             all_tokens.Add(token);
 
-                            if (antiprocessor.Add(decoded))
+                            if (generatedCount >= maxTokens || antiprocessor.Add(decoded))
                             {
                                 shouldStop = true;
                                 break;
@@ -268,11 +293,11 @@ namespace LLama
 
                         if (shouldStop || generatedCount >= maxTokens) break;
 
-                        // Advance C# tracking by the exact number of accepted drafts
+                        // Advance C# tracking by the exact number of accepted tokens
                         n_past += acceptedCount;
 
-                        // Feed the LAST accepted token back at its native position to match the C++ API logic
-                        _batch.Add((LLamaToken)acceptedTokens[^1], n_past - 1, LLamaSeqId.Zero, true);
+                        // Feed the last accepted token back at its native position for the next speculative burst
+                        _batch.Add(acceptedTokens[acceptedCount - 1], n_past - 1, LLamaSeqId.Zero, true);
                     }
                     else
                     {
